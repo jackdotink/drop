@@ -31,30 +31,6 @@ type Record = {
 	}?,
 }
 
-local function create<T>(opts: {
-	name: string,
-	schema: schema.Schema<T>,
-	rttime: number?,
-}): Store<T>
-	return {
-		source = rbxapi.getdatastore(opts.name),
-		schema = opts.schema,
-
-		lock = {},
-
-		rt = {
-			time = opts.rttime or 12,
-
-			state = {},
-			waiting = {},
-			loop = {},
-			cache = {},
-			queue = {},
-			observers = {},
-		},
-	}
-end
-
 --- Unwraps a record loaded from the datastore, returning an initial record if
 --- none exists.
 local function unwraprecord<T>(store: Store<T>, record: Record?): Record
@@ -683,6 +659,38 @@ local function txasync<T>(fn: (tx: <T>(store: Store<T>, key: string, fn: (T) -> 
 	if err then
 		error(err)
 	end
+end
+
+local function create<T>(opts: {
+	name: string,
+	schema: schema.Schema<T>,
+	rttime: number?,
+}): Store<T>
+	local store: Store<T> = {
+		source = rbxapi.getdatastore(opts.name),
+		schema = opts.schema,
+
+		lock = {},
+
+		rt = {
+			time = opts.rttime or 12,
+
+			state = {},
+			waiting = {},
+			loop = {},
+			cache = {},
+			queue = {},
+			observers = {},
+		},
+	}
+
+	game:BindToClose(function()
+		for key in store.rt.state do
+			task.defer(stoprtasync, store, key)
+		end
+	end)
+
+	return store
 end
 
 return {
