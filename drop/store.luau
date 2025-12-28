@@ -2,6 +2,7 @@ local callbacks = require("./callbacks")
 local schema = require("./schema")
 local rbxapi = require("./rbxapi")
 local utils = require("./utils")
+local tx = require("./tx")
 
 export type Store<T> = {
 	read source: DataStore,
@@ -24,6 +25,10 @@ export type Store<T> = {
 type Record = {
 	version: number,
 	data: any,
+	tx: {
+		id: string,
+		data: any,
+	}?,
 }
 
 local function create<T>(opts: {
@@ -156,6 +161,67 @@ local function releaselock<T>(store: Store<T>, key: string)
 	store.lock[key] = nil
 end
 
+--- Resolves the transaction on the given record, returning the updated record.
+--- 
+--- If `tx.resolveasync` is unable to resolve the transaction, the original
+--- record is returned.
+--- 
+--- If `tx.resolveasync` is able to resolve the transaction, the record is
+--- updated accordingly, and the transaction is adopted.
+local function resolvetxasync<T>(store: Store<T>, key: string, record: Record): Record
+	local txid = assert(record.tx, "no tx to resolve").id
+	local status = tx.resolveasync(txid)
+
+	if status == "committed" then
+		acquirelockasync(store, key)
+
+		local success, result = rbxapi.updateasync(store.source, key, function(record: Record): Record?
+			local record = unwraprecord(store, record)
+
+			if record.tx and record.tx.id == txid then
+				record.data = record.tx.data
+				record.tx = nil
+				return record
+			else
+				return nil
+			end
+		end)
+
+		releaselock(store, key)
+
+		if success then
+			task.defer(tx.adoptasync, txid, 1)
+			return result
+		else
+			return record
+		end
+	elseif status == "aborted" then
+		acquirelockasync(store, key)
+
+		local success, result = rbxapi.updateasync(store.source, key, function(record: Record): Record?
+			local record = unwraprecord(store, record)
+
+			if record.tx and record.tx.id == txid then
+				record.tx = nil
+				return record
+			else
+				return nil
+			end
+		end)
+
+		releaselock(store, key)
+
+		if success then
+			task.defer(tx.adoptasync, txid, 1)
+			return result
+		else
+			return record
+		end
+	else
+		return record
+	end
+end
+
 --- Flushes the queued updates for a given key to the datastore.
 --- 
 --- Returns the updated record on success, or nil on failure.
@@ -167,8 +233,11 @@ local function flushasync<T>(store: Store<T>, key: string): Record?
 
 	local success, record: Record = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
 		local record = unwraprecord(store, record)
-		local record = migraterecord(store, key, record)
+		if record.tx then
+			return nil
+		end
 
+		local record = migraterecord(store, key, record)
 		if record == nil then
 			error("migration failed")
 		end
@@ -179,16 +248,21 @@ local function flushasync<T>(store: Store<T>, key: string): Record?
 
 	releaselock(store, key)
 
-	if success then
-		return record
-	else
+	if not success or record.tx then
 		local newqueue = store.rt.queue[key]
 		if newqueue then
 			table.move(newqueue, 1, #newqueue, #queue + 1, queue)
 		end
 
 		store.rt.queue[key] = queue
+	end
+
+	if not success then
 		return nil
+	elseif record.tx then
+		return resolvetxasync(store, key, record)
+	else
+		return record
 	end
 end
 
@@ -242,6 +316,185 @@ local function rtasync<T>(store: Store<T>, key: string)
 
 		task.wait(store.rt.time)
 	end 
+end
+
+local function txprepareasync(fns: { [Store<any>]: { [string]: (any) -> any } }, txid: string): boolean
+	local thread: thread? = coroutine.running()
+	local total = 0
+
+	for store, keys in fns do
+		for key, fn in keys do
+			total += 1
+
+			task.defer(function()
+				local success, record: Record = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
+					local record = unwraprecord(store, record)
+					if record.tx then
+						return nil
+					end
+					
+					local record = migraterecord(store, key, record)
+					if record == nil then
+						error("migration failed")
+					end
+
+					local success, result = utils.externcall(fn, record.data)
+					if not success then
+						error("update function errored on txphase1")
+					end
+
+					record.tx = { id = txid, data = result }
+					return record
+				end)
+
+				if not success or not record.tx then
+					if thread then
+						coroutine.resume(thread, false)
+					end
+				elseif record.tx.id ~= txid then
+					task.defer(resolvetxasync, store, key, record)
+
+					if thread then
+						coroutine.resume(thread, false)
+					end
+				elseif  thread then
+					coroutine.resume(thread, true)
+				end
+			end)
+		end
+	end
+
+	local done = 0
+	while done < total and coroutine.yield() do
+		done += 1
+	end
+
+	thread = nil
+	return done == total
+end
+
+local function txcommitasync(fns: { [Store<any>]: { [string]: (any) -> any } }, txid: string)
+	local thread = coroutine.running()
+	local total = 0
+
+	for store, keys in fns do
+		for key in keys do
+			total += 1
+
+			task.defer(function(store: Store<any>, key: string, txid: string, thread: thread)
+				local success = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
+					local record = unwraprecord(store, record)
+					assert(record.tx and record.tx.id == txid, "unreachable")
+
+					record.data = record.tx.data
+					record.tx = nil
+					return record
+				end)
+
+				releaselock(store, key)
+				coroutine.resume(thread, success)
+			end, store, key, txid, thread)
+		end
+	end
+
+	local done = 0
+	local successful = 0
+	while done < total do
+		if coroutine.yield() then
+			successful += 1
+		end
+
+		done += 1
+	end
+
+	task.defer(tx.adoptasync, txid, successful)
+end
+
+local function txabortasync(fns: { [Store<any>]: { [string]: (any) -> any } }, txid: string)
+	local thread = coroutine.running()
+	local total = 0
+
+	for store, keys in fns do
+		for key in keys do
+			total += 1
+
+			task.defer(function(store: Store<any>, key: string, txid: string, thread: thread)
+				local success = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
+					local record = unwraprecord(store, record)
+
+					if record.tx and record.tx.id == txid then
+						record.tx = nil
+						return record
+					else
+						return nil
+					end
+				end)
+
+				releaselock(store, key)
+				coroutine.resume(thread, success)
+			end, store, key, txid, thread)
+		end
+	end
+
+	local done = 0
+	local successful = 0
+	while done < total do
+		if coroutine.yield() then
+			successful += 1
+		end
+
+		done += 1
+	end
+
+	tx.adoptasync(txid, successful)
+end
+
+local function txphase2(thread: thread, fns: { [Store<any>]: { [string]: (any) -> any } }, txid: string)
+	local status = tx.commitasync(txid)
+
+	if status == "committed" then
+		txcommitasync(fns, txid)
+		task.defer(thread, nil)
+	else
+		task.defer(txabortasync, fns, txid)
+		task.defer(thread, "txphase2 failed to commit")
+	end
+end
+
+local function txphase1(thread: thread, fns: { [Store<any>]: { [string]: (any) -> any } }, txid: string)
+	local success = txprepareasync(fns, txid)
+
+	if not success then
+		task.defer(txabortasync, fns, txid)
+		task.defer(thread, "txphase1 failed to prepare all keys")
+	else
+		txphase2(thread, fns, txid)
+	end
+end
+
+local function txphase0(thread: thread, fns: { [Store<any>]: { [string]: (any) -> any } })
+	local total = 0
+
+	for store, keys in fns do
+		for key in keys do
+			acquirelockasync(store, key)
+			total += 1
+		end
+	end
+
+	local txid = tx.createasync(total)
+
+	if txid == nil then
+		for store, keys in fns do
+			for key in keys do
+				releaselock(store, key)
+			end
+		end
+
+		task.defer(thread, "txphase0 failed to create tx")
+	else
+		txphase1(thread, fns, txid)
+	end
 end
 
 --- Starts real-time sync for a given key.
@@ -355,31 +608,80 @@ end
 --- 
 --- This function will error if the update fails.
 local function updateasync<T>(store: Store<T>, key: string, fn: (T) -> T): T
-	acquirelockasync(store, key)
+	local function apply<T>(store: Store<T>, key: string, fn: (T) -> T): Record?
+		acquirelockasync(store, key)
 
-	local success, record: Record = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
-		local record = unwraprecord(store, record)
-		local record = migraterecord(store, key, record)
+		local success, record: Record = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
+			local record = unwraprecord(store, record)
+			if record.tx then
+				return nil
+			end
+			
+			local record = migraterecord(store, key, record)
+			if record == nil then
+				error("migration failed")
+			end
 
-		if record == nil then
-			error("migration failed")
-		end
+			local success, result = utils.externcall(fn, record.data)
+			if not success then
+				error("update function errored on datastore-apply")
+			end
 
-		local success, result = utils.externcall(fn, record.data)
+			record.data = result
+			return record
+		end)
+
+		releaselock(store, key)
+		
 		if not success then
-			error("update function errored on datastore-apply")
+			return nil
+		else
+			return record
+		end
+	end
+
+	local record = apply(store, key, fn)
+	if record == nil then
+		error("datastore update failed")
+	elseif not record.tx then
+		return record.data
+	end
+
+	local record = resolvetxasync(store, key, record)
+	if record.tx then
+		error("transaction could not be resolved")
+	end
+
+	local record = apply(store, key, fn)
+	if record == nil then
+		error("datastore update failed")
+	elseif record.tx then
+		error("transaction could not be resolved")
+	else
+		return record.data
+	end
+end
+
+local function txasync<T>(fn: (tx: <T>(store: Store<T>, key: string, fn: (T) -> T) -> ()) -> ())
+	local fns: { [Store<any>]: { [string]: (any) -> any } } = {}
+
+	fn(function(store: Store<T>, key: string, fn: (T) -> T)
+		if fns[store] == nil then
+			fns[store] = {}
 		end
 
-		record.data = result
-		return record
+		if fns[store][key] then
+			error("cannot put multiple tx updates on the same key")
+		end
+
+		fns[store][key] = fn
 	end)
 
-	releaselock(store, key)
+	task.defer(txphase0, coroutine.running(), fns)
 
-	if success then
-		return record.data
-	else
-		error("datastore update failed")
+	local err = coroutine.yield()
+	if err then
+		error(err)
 	end
 end
 
@@ -393,4 +695,5 @@ return {
 	observe = observe,
 	viewasync = viewasync,
 	updateasync = updateasync,
+	txasync = txasync,
 }
