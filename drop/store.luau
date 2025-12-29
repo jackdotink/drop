@@ -8,7 +8,7 @@ export type Store<T> = {
 	read source: DataStore,
 	read schema: schema.Schema<T>,
 
-	read lock: { [string]: true },
+	read lock: { [string]: { (T) -> T } },
 
 	read rt: {
 		read time: number,
@@ -111,6 +111,10 @@ local function refresh<T>(store: Store<T>, key: string, data: T)
 		return
 	end
 
+	if store.lock[key] then
+		data = applyqueue(data, store.lock[key])
+	end
+
 	if store.rt.queue[key] then
 		data = applyqueue(data, store.rt.queue[key])
 	end
@@ -120,16 +124,11 @@ local function refresh<T>(store: Store<T>, key: string, data: T)
 	runobservers(store, key, data)
 end
 
---- Acquires a lock for the given key, waiting if necessary.
---- 
---- A lock must be acquired before performing any datastore operations on any
---- given key.
+--- Waits for a lock to be free for the given key.
 local function acquirelockasync<T>(store: Store<T>, key: string)
 	while store.lock[key] do
 		task.wait()
 	end
-
-	store.lock[key] = true
 end
 
 --- Releases a lock for the given key.
@@ -150,8 +149,9 @@ local function resolvetxasync<T>(store: Store<T>, key: string, record: Record): 
 
 	if status == "committed" then
 		acquirelockasync(store, key)
+		store.lock[key] = {}
 
-		local success, result = rbxapi.updateasync(store.source, key, function(record: Record): Record?
+		local success, result: Record = rbxapi.updateasync(store.source, key, function(record: Record): Record?
 			local record = unwraprecord(store, record)
 
 			if record.tx and record.tx.id == txid then
@@ -173,8 +173,9 @@ local function resolvetxasync<T>(store: Store<T>, key: string, record: Record): 
 		end
 	elseif status == "aborted" then
 		acquirelockasync(store, key)
+		store.lock[key] = {}
 
-		local success, result = rbxapi.updateasync(store.source, key, function(record: Record): Record?
+		local success, result: Record = rbxapi.updateasync(store.source, key, function(record: Record): Record?
 			local record = unwraprecord(store, record)
 
 			if record.tx and record.tx.id == txid then
@@ -203,9 +204,9 @@ end
 --- Returns the updated record on success, or nil on failure.
 local function flushasync<T>(store: Store<T>, key: string): Record?
 	acquirelockasync(store, key)
-
 	local queue = store.rt.queue[key]
 	store.rt.queue[key] = nil
+	store.lock[key] = queue
 
 	local success, record: Record = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
 		local record = unwraprecord(store, record)
@@ -339,6 +340,7 @@ local function txprepareasync(fns: { [Store<any>]: { [string]: (any) -> any } },
 						coroutine.resume(thread, false)
 					end
 				elseif  thread then
+					refresh(store, key, record.data)
 					coroutine.resume(thread, true)
 				end
 			end)
@@ -365,7 +367,7 @@ local function txcommitasync(fns: { [Store<any>]: { [string]: (any) -> any } }, 
 			total += 1
 
 			task.defer(function(store: Store<any>, key: string, txid: string, thread: thread)
-				local success = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
+				local success, record: Record = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
 					local record = unwraprecord(store, record)
 					assert(record.tx and record.tx.id == txid, "unreachable")
 
@@ -375,6 +377,11 @@ local function txcommitasync(fns: { [Store<any>]: { [string]: (any) -> any } }, 
 				end)
 
 				releaselock(store, key)
+
+				if success then
+					refresh(store, key, record.data)
+				end
+	
 				coroutine.resume(thread, success)
 			end, store, key, txid, thread)
 		end
@@ -404,7 +411,7 @@ local function txabortasync(fns: { [Store<any>]: { [string]: (any) -> any } }, t
 			total += 1
 
 			task.defer(function(store: Store<any>, key: string, txid: string, thread: thread)
-				local success = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
+				local success, record: Record = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
 					local record = unwraprecord(store, record)
 
 					if record.tx and record.tx.id == txid then
@@ -416,6 +423,11 @@ local function txabortasync(fns: { [Store<any>]: { [string]: (any) -> any } }, t
 				end)
 
 				releaselock(store, key)
+
+				if success then
+					refresh(store, key, record.data)
+				end
+
 				coroutine.resume(thread, success)
 			end, store, key, txid, thread)
 		end
@@ -476,6 +488,7 @@ local function txphase0(thread: thread, fns: { [Store<any>]: { [string]: (any) -
 	for store, keys in fns do
 		for key in keys do
 			acquirelockasync(store, key)
+			store.lock[key] = {}
 			total += 1
 		end
 	end
@@ -597,6 +610,8 @@ local function viewasync<T>(store: Store<T>, key: string): T
 		error("migration failed")
 	end
 
+	refresh(store, key, record.data)
+
 	return record.data
 end
 
@@ -608,6 +623,7 @@ end
 local function updateasync<T>(store: Store<T>, key: string, fn: (T) -> T): T
 	local function apply<T>(store: Store<T>, key: string, fn: (T) -> T): Record?
 		acquirelockasync(store, key)
+		store.lock[key] = {}
 
 		local success, record: Record = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
 			local record = unwraprecord(store, record)
@@ -634,6 +650,7 @@ local function updateasync<T>(store: Store<T>, key: string, fn: (T) -> T): T
 		if not success then
 			return nil
 		else
+			refresh(store, key, record.data)
 			return record
 		end
 	end
