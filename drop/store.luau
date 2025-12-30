@@ -87,7 +87,7 @@ local function applyqueue<T>(data: T, queue: { (T) -> T }): T
 	for _, fn in queue do
 		local success, result = utils.externcall(fn, utils.deepfreeze(data))
 
-		if success then
+		if success and result then
 			data = result
 		end
 	end
@@ -323,6 +323,10 @@ local function txprepareasync(fns: { [Store<any>]: { [string]: (any) -> any } },
 					local success, result = utils.externcall(fn, record.data)
 					if not success then
 						error("update function errored on txphase1")
+					end
+
+					if not result then
+						return nil
 					end
 
 					record.tx = { id = txid, data = result }
@@ -580,8 +584,10 @@ local function update<T>(store: Store<T>, key: string, fn: (T) -> T)
 		store.rt.queue[key] = { fn }
 	end
 
-	store.rt.cache[key] = utils.deepfreeze(result)
-	runobservers(store, key, result)
+	if result then
+		store.rt.cache[key] = utils.deepfreeze(result)
+		runobservers(store, key, result)
+	end
 end
 
 --- Observes updates to the store.
@@ -639,6 +645,10 @@ local function updateasync<T>(store: Store<T>, key: string, fn: (T) -> T): T
 			local success, result = utils.externcall(fn, record.data)
 			if not success then
 				error("update function errored on datastore-apply")
+			end
+
+			if not result then
+				return nil
 			end
 
 			record.data = result
