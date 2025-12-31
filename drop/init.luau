@@ -12,9 +12,9 @@ return table.freeze({
 	migrate = schema.migrate,
 
 	store = store.create,
-	startrt = store.startrt,
-	waitforrt = store.waitforrt,
-	stoprtasync = store.stoprtasync,
+	startsession = store.startsession,
+	waitforsession = store.waitforsession,
+	stopsessionasync = store.stopsessionasync,
 	view = store.view,
 	update = store.update,
 	observe = store.observe,

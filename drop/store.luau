@@ -10,7 +10,7 @@ export type Store<T> = {
 
 	read lock: { [string]: { (T) -> T } },
 
-	read rt: {
+	read session: {
 		read time: number,
 
 		read state: { [string]: "starting" | "active" },
@@ -97,7 +97,7 @@ end
 
 --- Notifies all observers of an update to the given key with the provided data.
 local function runobservers<T>(store: Store<T>, key: string, data: T)
-	for _, observer in store.rt.observers do
+	for _, observer in store.session.observers do
 		task.defer(observer, key, data)
 	end
 end
@@ -107,7 +107,7 @@ end
 --- 
 --- If sync is not active for the given key, this is a no-op.
 local function refresh<T>(store: Store<T>, key: string, data: T)
-	if not store.rt.state[key] then
+	if not store.session.state[key] then
 		return
 	end
 
@@ -115,12 +115,12 @@ local function refresh<T>(store: Store<T>, key: string, data: T)
 		data = applyqueue(data, store.lock[key])
 	end
 
-	if store.rt.queue[key] then
-		data = applyqueue(data, store.rt.queue[key])
+	if store.session.queue[key] then
+		data = applyqueue(data, store.session.queue[key])
 	end
 
 	local data = utils.deepfreeze(data)
-	store.rt.cache[key] = data
+	store.session.cache[key] = data
 	runobservers(store, key, data)
 end
 
@@ -204,8 +204,8 @@ end
 --- Returns the updated record on success, or nil on failure.
 local function flushasync<T>(store: Store<T>, key: string): Record?
 	acquirelockasync(store, key)
-	local queue = store.rt.queue[key]
-	store.rt.queue[key] = nil
+	local queue = store.session.queue[key]
+	store.session.queue[key] = nil
 	store.lock[key] = queue
 
 	local success, record: Record = rbxapi.updateasync(store.source, key, function(record: Record?): Record?
@@ -226,12 +226,12 @@ local function flushasync<T>(store: Store<T>, key: string): Record?
 	releaselock(store, key)
 
 	if not success or record.tx then
-		local newqueue = store.rt.queue[key]
+		local newqueue = store.session.queue[key]
 		if newqueue then
 			table.move(newqueue, 1, #newqueue, #queue + 1, queue)
 		end
 
-		store.rt.queue[key] = queue
+		store.session.queue[key] = queue
 	end
 
 	if not success then
@@ -261,23 +261,23 @@ local function rtasync<T>(store: Store<T>, key: string)
 		return record.data
 	end
 
-	while store.rt.state[key] do
-		if store.rt.state[key] == "starting" then
+	while store.session.state[key] do
+		if store.session.state[key] == "starting" then
 			local data = readasync(store, key)
 
 			if data then
-				store.rt.state[key] = "active"
+				store.session.state[key] = "active"
 				refresh(store, key, data)
-			elseif not store.rt.cache[key] then
+			elseif not store.session.cache[key] then
 				refresh(store, key, store.schema.initial)
 			end
 
-			for _, thread in store.rt.waiting[key] do
+			for _, thread in store.session.waiting[key] do
 				task.defer(thread)
 			end
 
-			store.rt.waiting[key] = nil
-		elseif store.rt.queue[key] then
+			store.session.waiting[key] = nil
+		elseif store.session.queue[key] then
 			local record = flushasync(store, key)
 
 			if record then
@@ -291,7 +291,7 @@ local function rtasync<T>(store: Store<T>, key: string)
 			end
 		end
 
-		task.wait(store.rt.time)
+		task.wait(store.session.time)
 	end 
 end
 
@@ -513,41 +513,41 @@ local function txphase0(thread: thread, fns: { [Store<any>]: { [string]: (any) -
 end
 
 --- Starts real-time sync for a given key.
-local function startrt<T>(store: Store<T>, key: string)
-	if store.rt.state[key] then
+local function startsession<T>(store: Store<T>, key: string)
+	if store.session.state[key] then
 		error(`sync already started for key "{key}"`)
-	elseif store.rt.queue[key] then
+	elseif store.session.queue[key] then
 		error(`still stopping sync for key "{key}"`)
 	end
 
-	store.rt.state[key] = "starting"
-	store.rt.waiting[key] = {}
-	store.rt.loop[key] = task.spawn(rtasync, store, key)
+	store.session.state[key] = "starting"
+	store.session.waiting[key] = {}
+	store.session.loop[key] = task.spawn(rtasync, store, key)
 end
 
 --- Waits for real-time sync to start for a given key.
-local function waitforrt<T>(store: Store<T>, key: string)
-	if not store.rt.state[key] then
+local function waitforsession<T>(store: Store<T>, key: string)
+	if not store.session.state[key] then
 		error(`sync not started for key "{key}"`)
-	elseif store.rt.state[key] == "active" then
+	elseif store.session.state[key] == "active" then
 		return
 	end
 
-	table.insert(store.rt.waiting[key], coroutine.running())
+	table.insert(store.session.waiting[key], coroutine.running())
 	coroutine.yield()
 end
 
 --- Stops real-time sync for a given key.
-local function stoprtasync<T>(store: Store<T>, key: string)
-	if not store.rt.state[key] then
+local function stopsessionasync<T>(store: Store<T>, key: string)
+	if not store.session.state[key] then
 		error(`sync not started for key "{key}"`)
 	end
 
-	store.rt.state[key] = nil
-	store.rt.loop[key] = nil
-	store.rt.cache[key] = nil
+	store.session.state[key] = nil
+	store.session.loop[key] = nil
+	store.session.cache[key] = nil
 
-	while store.rt.queue[key] do
+	while store.session.queue[key] do
 		flushasync(store, key)
 	end
 end
@@ -556,7 +556,7 @@ end
 --- 
 --- If sync is not active for the given key, this errors.
 local function view<T>(store: Store<T>, key: string): T
-	local data = store.rt.cache[key]
+	local data = store.session.cache[key]
 
 	if data == nil then
 		error(`no cached data for key "{key}"`)
@@ -569,23 +569,23 @@ end
 --- 
 --- If sync is not active for the given key, this errors.
 local function update<T>(store: Store<T>, key: string, fn: (T) -> T)
-	if not store.rt.state[key] then
+	if not store.session.state[key] then
 		error(`sync not started for key "{key}"`)
 	end
 
-	local success, result = utils.externcall(fn, store.rt.cache[key])
+	local success, result = utils.externcall(fn, store.session.cache[key])
 	if not success then
 		error("update function errored on cache-apply")
 	end
 
-	if store.rt.queue[key] then
-		table.insert(store.rt.queue[key], fn)
+	if store.session.queue[key] then
+		table.insert(store.session.queue[key], fn)
 	else
-		store.rt.queue[key] = { fn }
+		store.session.queue[key] = { fn }
 	end
 
 	if result then
-		store.rt.cache[key] = utils.deepfreeze(result)
+		store.session.cache[key] = utils.deepfreeze(result)
 		runobservers(store, key, result)
 	end
 end
@@ -595,7 +595,7 @@ end
 --- The provided function is called with the key and updated data whenever an
 --- update occurs. Data might be different or the same as the previous update.
 local function observe<T>(store: Store<T>, fn: (key: string, data: T) -> ())
-	table.insert(store.rt.observers, fn)
+	table.insert(store.session.observers, fn)
 end
 
 --- Views the data for a given key directly from the datastore.
@@ -722,7 +722,7 @@ end
 local function create<T>(opts: {
 	name: string,
 	schema: schema.Schema<T>,
-	rttime: number?,
+	sessiontime: number?,
 }): Store<T>
 	local store: Store<T> = {
 		source = rbxapi.getdatastore(opts.name),
@@ -730,8 +730,8 @@ local function create<T>(opts: {
 
 		lock = {},
 
-		rt = {
-			time = opts.rttime or 12,
+		session = {
+			time = opts.sessiontime or 12,
 
 			state = {},
 			waiting = {},
@@ -743,8 +743,8 @@ local function create<T>(opts: {
 	}
 
 	game:BindToClose(function()
-		for key in store.rt.state do
-			task.defer(stoprtasync, store, key)
+		for key in store.session.state do
+			task.defer(stopsessionasync, store, key)
 		end
 	end)
 
@@ -753,9 +753,9 @@ end
 
 return table.freeze({
 	create = create,
-	startrt = startrt,
-	waitforrt = waitforrt,
-	stoprtasync = stoprtasync,
+	startsession = startsession,
+	waitforsession = waitforsession,
+	stopsessionasync = stopsessionasync,
 	view = view,
 	update = update,
 	observe = observe,

@@ -46,11 +46,11 @@ end
 > [!TIP]
 > `drop.updateasync` implements its own internal retry logic. Don't repeatedly call `drop.updateasync` if it errors.
 
-We don't want to worry about catching errors, and we want updates to apply immediately, in real-time. That means we're going to need to open a real-time session. To start an rt session, call `drop.startrt`. This function does not yield, but the session will not be immediately available. To wait for the key's session to be available, call `drop.waitforrt`.
+We don't want to worry about catching errors, and we want updates to apply immediately. That means we're going to need to open a session. To start a session, call `drop.startsession`. This function does not yield, but the session will not be immediately available. To wait for the key's session to be available, call `drop.waitforsession`.
 
 ```luau
-drop.startrt(store, "jack")
-drop.waitforrt(store, "jack")
+drop.startsession(store, "jack")
+drop.waitforsession(store, "jack")
 ```
 
 The session has been started, we can now view and update the data in the same way without yielding. Let's make a purchase item function. All updates passed to drop should be atomic and pure. Update functions may be called any number of times. To cancel an update, return `nil`.
