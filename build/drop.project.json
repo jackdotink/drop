@@ -1,6 +1,6 @@
 {
 	"name": "drop",
 	"tree": {
-		"$path": "drop"
+		"$path": "../drop"
 	}
 }
