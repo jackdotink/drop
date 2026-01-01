@@ -1,0 +1,9 @@
+[package]
+name = "jackdotink/drop"
+description = "A datastore library built on ACID principles."
+authors = ["jackdotink <jackdotink@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/jackdotink/drop"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "server"
+version = "1.0.0"

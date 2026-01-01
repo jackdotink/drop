@@ -1,0 +1,28 @@
+name: Build
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+  
+    - name: Install rojo
+      run: |
+        gh release download -R rojo-rbx/rojo -p "*-linux-x86_64.zip" -o "rojo.zip"
+        unzip rojo.zip
+        chmod +x ./rojo
+      
+    - name: Build rbxm files
+      run: |
+        ./rojo build ./build/drop.project.json -o ./build/drop.rbxm
+        ./rojo build ./build/snow.project.json -o ./build/snow.rbxm
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: artifacts
+        path: ./build/*.rbxm
+
