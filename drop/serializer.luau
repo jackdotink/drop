@@ -38,7 +38,7 @@ local function unreachable(value: never): never
 	return (error(`unreachable: {value}`))
 end
 
-local function writeid(id: number, alloc: number?): ()
+local function writeid(id: number): ()
 	buffer.writeu8(writebuf, offset, id)
 	offset += 1
 end
@@ -81,13 +81,13 @@ local function writedata(data: AnyData)
 		if data == 0 then
 			writeid(idzero)
 		else
-			writeid(idnumber, 8)
+			writeid(idnumber)
 			buffer.writef64(writebuf, offset, data)
 			offset += 8
 		end
 	elseif typeof(data) == "string" then
 		local strlength = #data
-		writeid(idstring, 4 + strlength)
+		writeid(idstring)
 		buffer.writeu32(writebuf, offset, strlength)
 		offset += 4
 		buffer.writestring(writebuf, offset, data, strlength)
@@ -96,7 +96,7 @@ local function writedata(data: AnyData)
 		if data == vector.zero then
 			writeid(idzerovector)
 		else
-			writeid(idvector, 12)
+			writeid(idvector)
 			writevector12(data)
 		end
 	elseif typeof(data) == "boolean" then
@@ -106,8 +106,8 @@ local function writedata(data: AnyData)
 			writeid(idfalse)
 		end
 	elseif typeof(data) == "buffer" then
+		writeid(idbuffer)
 		local valuelength = buffer.len(data)
-		writeid(idbuffer, 4 + valuelength)
 		buffer.writeu32(writebuf, offset, valuelength)
 		offset += 4
 		buffer.copy(writebuf, offset, data)
@@ -118,12 +118,12 @@ local function writedata(data: AnyData)
 		if data == CFrame.identity then
 			writeid(ididentitycframe)
 		else
-			writeid(idcframe, 12 + 12)
+			writeid(idcframe)
 			writevector12(data.Position)
 			writevector12(vector.create(data:ToEulerAngles()))
 		end
 	elseif typeof(data) == "DateTime" then
-		writeid(iddatetime, 8)
+		writeid(iddatetime)
 		buffer.writef64(writebuf, offset, data.UnixTimestampMillis)
 		offset += 8
 	elseif typeof(data) == "Color3" then
