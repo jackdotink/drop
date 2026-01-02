@@ -1,4 +1,7 @@
 {
 	"luau-lsp.sourcemap.enabled": false,
 	"luau-lsp.fflags.enableNewSolver": true,
+	"luau-lsp.types.definitionFiles": {
+		"vector_types": "vectortypes.d.luau"
+	}
 }
