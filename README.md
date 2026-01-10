@@ -1,6 +1,17 @@
 # Drop
 
-A datastore library.
+Drop is a datastore library with a large number of features in a small api. You should use drop if you want:
+
+- Transactions that atomically update several keys at once.
+  - Useful for implementing trading between players in a way that prevents duplication glitches.
+- Migrations that safely move between different schema versions.
+- Multiple servers to read and write to the same data at the same time.
+  - No waiting for locks when joining or teleporting.
+- An api built around updates and immutable data.
+- Immediate cached updates paired with rollbacks.
+- A datastore library built on [ACID](#acid) principles.
+
+You may not want to use drop if you need to store large amounts of data per key. Drop restricts the size of each key's data to 2MB.
 
 ## Quick start
 
@@ -8,115 +19,57 @@ Drop has two main types: schemas and stores. Let's make both.
 
 ```luau
 local drop = require("@drop")
+local tbl = require("@snow/tbl")
+local set = require("@snow/set")
 
 local schema = drop.schema({
-	coins = 100,
+	coins = 0,
 	items = {} :: { [string]: true },
 })
 
 local store = drop.store({
-	name = "players",
+	name = "playerdata",
 	schema = schema,
 })
-```
 
-Let's view jack's data. To view the data of any key, call `drop.viewasync`. This function yields and loads data directly from storage. If the data cannot be loaded for any reason, then this function will error.
+local data = drop.viewasync(store, "marcus")
+print(data.coins) --> 0
 
-```luau
-local data = drop.viewasync(store, "jack")
-```
-
-Jack purchased a developer product for 1000 coins, so let's give that to him. To update data use `drop.updateasync`. This function yields while it attempts to apply the update directly to storage. If the update fails for any reason, then the function will error. This should be the function you use when you need to know if an update was successful.
-
-```luau
-local success = pcall(drop.updateasync, store, "jack", function(data)
-	return {
-		coins = data.coins + 1000,
-		items = data.items,
-	}
+local data = drop.updateasync(store, "marcus", function(data)
+	return tbl.merge(data, {
+		coins = data.coins + 10,
+	})
 end)
 
-if success then
-	return Enum.ProductPurchaseDecision.PurchaseGranted
-else
-	return Enum.ProductPurchaseDecision.NotProcessedYet
-end
+print(data.coins) --> 10
 ```
 
-> [!TIP]
-> `drop.updateasync` implements its own internal retry logic. Don't repeatedly call `drop.updateasync` if it errors.
+## Installation
 
-We don't want to worry about catching errors, and we want updates to apply immediately. That means we're going to need to open a session. To start a session, call `drop.startsession`. This function does not yield, but the session will not be immediately available. To wait for the key's session to be available, call `drop.waitforsession`.
+### Roblox model files
 
-```luau
-drop.startsession(store, "jack")
-drop.waitforsession(store, "jack")
+Drop can be installed via a Roblox model file. You can find the latest version of drop on the [latest release page](https://github.com/jackdotink/drop/releases/latest). Download the `drop` model file and insert it into your Roblox place.
+
+Snow is the recommended, but not required, library for working with immutable data in conjunction with drop. You can find the latest version of snow at the same place as drop. Download the `snow` model file and insert it into your Roblox place.
+
+### Wally
+
+Drop can be installed via [Wally](https://github.com/UpliftGames/wally). To install drop, add the following dependency to your `wally.toml` file:
+
+```toml
+[dependencies]
+drop = "jackdotink/drop@1.0.0"
 ```
 
-The session has been started, we can now view and update the data in the same way without yielding. Let's make a purchase item function. All updates passed to drop should be atomic and pure. Update functions may be called any number of times. To cancel an update, return `nil`.
+Snow is the recommended, but not required, library for working with immutable data in conjunction with drop. To install snow, add the following dependency to your `wally.toml` file:
 
-```luau
-local function purchase(key: string, item: string, cost: number)
-	drop.update(store, key, function(data)
-		if data.coins >= cost and not data.items[item] then
-			local items = table.clone(data.items)
-			items[item] = true
-			
-			return {
-				coins = data.coins - cost,
-				items = items,
-			}
-		else
-			return nil
-		end
-	end)
-end
+```toml
+[dependencies]
+snow = "jackdotink/snow@1.0.0"
 ```
 
-Updates from `drop.update` apply immediately, but we want to see this data changing. For that, we can make an observer. Observers take functions that get called every time data updates. The data may be the same, or it may be different.
+Then run `wally install` to install the dependency.
 
-```luau
-drop.observe(store, function(key, data)
-	print(`{key} has {data.coins} coins!`)
-end)
-```
+## Documentation
 
-Marcus and Jack want to trade items. When an update needs to apply to multiple keys, transactions should be used.
-
-```luau
-drop.txasync(function(tx)
-	tx(store, "jack", function(data)
-		if not data.items["sword"] then
-			return nil
-		end
-
-		local items = table.clone(data.items)
-		items["sword"] = nil
-		items["horn"] = true
-
-		return {
-			coins = data.coins,
-			items = items,
-		}
-	end)
-
-	tx(store, "marcus", function(data)
-		if not data.items["horn"] then
-			return nil
-		end
-
-		local items = table.clone(data.items)
-		items["sword"] = true
-		items["horn"] = nil
-
-		return {
-			coins = data.coins,
-			items = items,
-		}
-	end)
-end)
-```
-
-## Help
-
-You can ask questions and talk to maintainers either here on github, or in the [Roblox OSS discord](https://quenty.org/oss/conduct).
+Drop's documentation is best viewed within a code editor. Download the repository (`git clone https://github.com/jackdotink/drop.git`) and navigate into the docs folder (`cd drop/docs`) to view the documentation files.

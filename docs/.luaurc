@@ -1,0 +1,10 @@
+{
+	"languageMode": "strict",
+	"lint": {
+		"LocalShadow": false
+	},
+	"aliases": {
+		"drop": "../drop",
+		"snow": "../snow"
+	}
+}
