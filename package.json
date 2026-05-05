@@ -1,0 +1,19 @@
+{
+  "name": "@rbxts/drop",
+  "version": "1.0.2",
+  "main": "drop/init.lua",
+  "types": "drop/index.d.ts",
+  "files": [
+    "drop",
+    "!**/*.tsbuildinfo"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@rbxts/compiler-types": "3.0.0-types.0",
+    "@rbxts/types": "^1.0.902",
+    "roblox-ts": "^3.0.0",
+    "typescript": "^5.9.3"
+  }
+}
